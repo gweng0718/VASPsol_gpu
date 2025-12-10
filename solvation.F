@@ -1871,7 +1871,7 @@ MODULE POT_K
  USE prec
  USE base
  USE mpimy 
- USE pot_lpcm_k, ONLY : Vcorrection_lpcm, MY_D_PROD, SP_IO, SimplePoisson
+ USE pot_lpcm_k, ONLY : Vcorrection_lpcm, MY_D_PROD, SP_IO, SimplePoisson, PK_COUNTER
  USE pot_lpcm_k, ONLY : GET_VAC_LEVEL, VACPOT_POIS, UNPACK_C2R
 #ifdef debugsolwf
  USE pot_lpcm_k, ONLY : WRITE_TO_FILE
@@ -1892,7 +1892,7 @@ MODULE POT_K
 
  PRIVATE :: IONIC_CHARGE, GETRCORE, Fcorrection, JDFTX_INTERFACE
 
- INTEGER, PUBLIC, SAVE :: PK_COUNTER = 1
+ ! PK_COUNTER is imported from POT_LPCM_K module
  ! numerical params
  REAL(q), PRIVATE, SAVE :: sigma_nc_k
  REAL(q), ALLOCATABLE, PRIVATE, SAVE :: sigma_rc_k(:), CORE_C(:)
@@ -2343,6 +2343,7 @@ MODULE POT_K
 !-------------------------------------------------------------
 !calculate force correction,flag=5(not used)
 !-------------------------------------------------------------
+!$ACC UPDATE SELF(Vcorr,Vdiel)
    CALL Fcorrection(SP_GRIDC,SP_P,SP_T_INFO,SP_LATT_CUR, &
         & Vcorr,Vdiel, EIFOR_SOL)
 
@@ -2453,48 +2454,46 @@ SUBROUTINE IONIC_CHARGE (SP_GRIDC,SP_LATT_CUR,SP_P,SP_T_INFO,SP_N, &
 
 !$ACC ENTER DATA COPYIN(SP_T_INFO%POSION, SP_T_INFO%NITYP, SP_T_INFO%VCA, CORE_C, sigma_rc_k, ZVALF_D) __IF_ASYNC__
 
-!$ACC PARALLEL LOOP PRESENT(SP_N, SP_GRIDC, SP_LATT_CUR, SP_T_INFO%POSION, SP_T_INFO%NITYP, SP_T_INFO%VCA, CORE_C, sigma_rc_k, ZVALF_D) &
+ ASSOCIATE(POSION => SP_T_INFO%POSION, NITYP => SP_T_INFO%NITYP, VCA => SP_T_INFO%VCA, &
+           I2 => SP_GRIDC%RC%I2, I3 => SP_GRIDC%RC%I3, &
+           LPCTX => SP_GRIDC%LPCTX, LPCTY => SP_GRIDC%LPCTY, LPCTZ => SP_GRIDC%LPCTZ, &
+           B => SP_LATT_CUR%B)
+
+!$ACC PARALLEL LOOP PRESENT(SP_N, POSION, NITYP, VCA, CORE_C, sigma_rc_k, ZVALF_D, I2, I3, LPCTX, LPCTY, LPCTZ, B) &
 !$ACC PRIVATE(SP_G1,SP_G2,SP_G3,SP_CEXPF,SP_GX,SP_GY,SP_GZ,SP_GSQU, SP_NIS, SP_NT, SP_NI, POS1, POS2, POS3, VCA_VAL, ZVALF_VAL, CORE_C_VAL, SIGMA_RC_VAL, SP_N1, SP_NC, SP_N2, SP_N3) __IF_ASYNC__
        DO SP_NG=1,SP_GRIDC%RC%NP
           SP_N1= MOD((SP_NG-1),SP_GRIDC%RC%NROW) +1
           SP_NC= (SP_NG-1)/SP_GRIDC%RC%NROW+1
-          SP_N2= SP_GRIDC%RC%I2(SP_NC)
-          SP_N3= SP_GRIDC%RC%I3(SP_NC)
+          SP_N2= I2(SP_NC)
+          SP_N3= I3(SP_NC)
 
-          SP_GX = (SP_GRIDC%LPCTX(SP_N1) * SP_LATT_CUR%B(1,1) + &
-               & SP_GRIDC%LPCTY(SP_N2) * SP_LATT_CUR%B(2,2) + &
-               & SP_GRIDC%LPCTZ(SP_N3) * SP_LATT_CUR%B(3,3)) ! Note: B indices were mixed in original? No, B(1,1), B(2,2), B(3,3) is diagonal?
-          ! Wait, original code:
-          ! SP_GX = (LPCTX(N1)*B(1,1) + LPCTY(N2)*B(1,2) + LPCTZ(N3)*B(1,3))
-          ! My reconstruction above was wrong. I must copy exactly.
-          
-          SP_GX = (SP_GRIDC%LPCTX(SP_N1) * SP_LATT_CUR%B(1,1) + &
-               & SP_GRIDC%LPCTY(SP_N2) * SP_LATT_CUR%B(1,2) + &
-               & SP_GRIDC%LPCTZ(SP_N3) * SP_LATT_CUR%B(1,3))
-          SP_GY = (SP_GRIDC%LPCTX(SP_N1) * SP_LATT_CUR%B(2,1) + &
-               & SP_GRIDC%LPCTY(SP_N2) * SP_LATT_CUR%B(2,2) + &
-               & SP_GRIDC%LPCTZ(SP_N3) * SP_LATT_CUR%B(2,3))
-          SP_GZ = (SP_GRIDC%LPCTX(SP_N1) * SP_LATT_CUR%B(3,1) + &
-               & SP_GRIDC%LPCTY(SP_N2) * SP_LATT_CUR%B(3,2) + &
-               & SP_GRIDC%LPCTZ(SP_N3) * SP_LATT_CUR%B(3,3))
+          SP_GX = (LPCTX(SP_N1) * B(1,1) + &
+               & LPCTY(SP_N2) * B(1,2) + &
+               & LPCTZ(SP_N3) * B(1,3))
+          SP_GY = (LPCTX(SP_N1) * B(2,1) + &
+               & LPCTY(SP_N2) * B(2,2) + &
+               & LPCTZ(SP_N3) * B(2,3))
+          SP_GZ = (LPCTX(SP_N1) * B(3,1) + &
+               & LPCTY(SP_N2) * B(3,2) + &
+               & LPCTZ(SP_N3) * B(3,3))
 
           SP_GSQU = (SP_GX*SP_GX + SP_GY*SP_GY + SP_GZ*SP_GZ) * (TPI**2)
 
           SP_NIS = 1
           type:DO SP_NT=1,SP_T_INFO%NTYP
-             VCA_VAL = SP_T_INFO%VCA(SP_NT)
+             VCA_VAL = VCA(SP_NT)
              ZVALF_VAL = ZVALF_D(SP_NT)
              CORE_C_VAL = CORE_C(SP_NT)
              SIGMA_RC_VAL = sigma_rc_k(SP_NT)
 
-             ions: DO SP_NI=SP_NIS,SP_T_INFO%NITYP(SP_NT)+SP_NIS-1
-                POS1 = SP_T_INFO%POSION(1,SP_NI)
-                POS2 = SP_T_INFO%POSION(2,SP_NI)
-                POS3 = SP_T_INFO%POSION(3,SP_NI)
+             ions: DO SP_NI=SP_NIS,NITYP(SP_NT)+SP_NIS-1
+                POS1 = POSION(1,SP_NI)
+                POS2 = POSION(2,SP_NI)
+                POS3 = POSION(3,SP_NI)
 
-                SP_G1 = POS1*SP_GRIDC%LPCTX(SP_N1)
-                SP_G2 = POS2*SP_GRIDC%LPCTY(SP_N2)
-                SP_G3 = POS3*SP_GRIDC%LPCTZ(SP_N3)
+                SP_G1 = POS1*LPCTX(SP_N1)
+                SP_G2 = POS2*LPCTY(SP_N2)
+                SP_G3 = POS3*LPCTZ(SP_N3)
                 
                 SP_CEXPF=EXP(-CITPI*(SP_G3+SP_G2+SP_G1))*VCA_VAL
 
@@ -2506,9 +2505,12 @@ SUBROUTINE IONIC_CHARGE (SP_GRIDC,SP_LATT_CUR,SP_P,SP_T_INFO,SP_N, &
                         & EXP(-0.5_q*SP_GSQU*(SIGMA_RC_VAL**2))
                 ENDIF
              ENDDO ions
-             SP_NIS = SP_NIS + SP_T_INFO%NITYP(SP_NT)
+             SP_NIS = SP_NIS + NITYP(SP_NT)
           END DO type
        ENDDO
+
+ END ASSOCIATE
+
 !$ACC EXIT DATA DELETE(SP_T_INFO%POSION, SP_T_INFO%NITYP, SP_T_INFO%VCA, CORE_C, sigma_rc_k, ZVALF_D) __IF_ASYNC__
  DEALLOCATE(ZVALF_D)
 
@@ -2547,15 +2549,12 @@ SUBROUTINE Fcorrection(GRIDC,P,T_INFO,LATT_CUR,Vcorr,Vdiel, EIFOR_SOL)
    
   ALLOCATE(GWORK(GRIDC%RC%NP),PCWORK(GRIDC%RC%NP))
 
-!$ACC ENTER DATA CREATE(GWORK,PCWORK) __IF_ASYNC__
-
   NIS=1
 
   typ: DO NT=1,T_INFO%NTYP
      
      NIADD=T_INFO%NITYP(NT)
 
-!$ACC PARALLEL LOOP PRESENT(GWORK,PCWORK) PRIVATE(GX,GY,GZ,G) __IF_ASYNC__
       DO N=1,GRIDC%RC%NP
          N1= MOD((N-1),GRIDC%RC%NROW) +1
          NC= (N-1)/GRIDC%RC%NROW+1
@@ -2627,7 +2626,6 @@ SUBROUTINE Fcorrection(GRIDC,P,T_INFO,LATT_CUR,Vcorr,Vdiel, EIFOR_SOL)
               G3=T_INFO%POSION(3,NI)*GRIDC%LPCTZ(N3)
               CE=EXP(-CITPI*(G3+G2+G1))*T_INFO%VCA(NT)
 
-!$ACC PARALLEL LOOP PRESENT(GWORK,Vcorr,Vdiel,PCWORK) REDUCTION(+:FOR1,FOR2,FOR3) PRIVATE(CE,CEXPF,FOR) __IF_ASYNC__
                DO N1P=0,GRIDC%RC%NROW-1
                   SETN1fromN1P
                   NG=NGP+N1
@@ -2671,8 +2669,6 @@ SUBROUTINE Fcorrection(GRIDC,P,T_INFO,LATT_CUR,Vcorr,Vdiel, EIFOR_SOL)
      CALLMPI( M_sum_d(GRIDC%COMM, EIFOR_SOL(1,1),T_INFO%NIONS*3))
      
      CALL  DIRKAR(T_INFO%NIONS,EIFOR_SOL,LATT_CUR%B)
-
-!$ACC EXIT DATA DELETE(GWORK,PCWORK) __IF_ASYNC__
 
       DEALLOCATE(GWORK,PCWORK)
 
