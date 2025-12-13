@@ -91,6 +91,8 @@ SUBROUTINE Vcorrection_lpcm(SP_GRIDC, SP_LATT_CUR, SP_P, &
 
 !$ACC ENTER DATA CREATE(SP_d_eps,SP_kappa2,phi_tilda,phi,Vcav,RWORK) &
 !$ACC CREATE(RWORK_PHI,RWORK_CHG,CWORK_K,RHOB,RHOION) __IF_ASYNC__
+
+!$ACC UPDATE DEVICE(SP_LATT_CUR)
       
  IF (PK_COUNTER == 1)  THEN
    if(.not.allocated(Sol_phi)) then
@@ -263,6 +265,10 @@ SUBROUTINE Vcorrection_lpcm(SP_GRIDC, SP_LATT_CUR, SP_P, &
  CALL RC_ADD(SP_CHTOT, 1.0_q, SP_CHTOT, 0.0_q, CWORK_K, SP_GRIDC)
  CALL FFT3D(CWORK_K, SP_GRIDC, 1) 
  CALL UNPACK_C2R(CWORK_K, 1.0_q, CWORK_K, 0.0_q, RWORK_CHG, SP_GRIDC)
+ 
+ ! Sync data to Host for CPU call
+ !$ACC UPDATE SELF(RWORK_PHI, RWORK_CHG)
+ 
  CALL GET_VAC_LEVEL(SP_GRIDC, RWORK_CHG, RWORK_PHI, VACPOT_POIS)
 #ifdef debugsol
  IF (SP_IO%IU0>=0)   WRITE(SP_IO%IU0,*) 'VACPOT_POIS = ', VACPOT_POIS
@@ -2373,12 +2379,9 @@ MODULE POT_K
 !-------------------------------------------------------------
    PK_COUNTER = PK_COUNTER + 1
 
-!$ACC EXIT DATA DELETE(SP_N,TOTN,Vdiel,PS_TOTN,SP_N_ION,SP_GRIDC,SP_LATT_CUR) __IF_ASYNC__
-
-    DEALLOCATE(SP_N,TOTN)
-    DEALLOCATE(Vdiel)
-    DEALLOCATE(PS_TOTN)
-    DEALLOCATE(SP_N_ION)
+!$ACC EXIT DATA DELETE(SP_N,TOTN,Vdiel,PS_TOTN,SP_N_ION) __IF_ASYNC__
+    
+    DEALLOCATE(SP_N,TOTN,Vdiel,PS_TOTN,SP_N_ION)
 
 !-------------------------------------------------------------
 !if LSOL = .FALSE., sets Vcorr and Ecorr to 0._q
@@ -2876,12 +2879,30 @@ SUBROUTINE GET_FERMISHIFT(LATT_CUR, T_INFO, GRIDC, WDES, CVPSP, CHTOT)
   ALLOCATE(CVHAR(GRIDC%MPLWV), CV(GRIDC%MPLWV))
   ALLOCATE(RCHTOT(DIMREAL(GRIDC%MPLWV)), RV(DIMREAL(GRIDC%MPLWV)))
 
+
+#ifdef _OPENACC
+  ! Ensure lattice vectors are up-to-date (Synchronous! Fixes div-by-zero & accuracy)
+  !$acc update device( LATT_CUR )
+  ! Create local work arrays on device (no copyin needed for zeros)
+  !$acc enter data create( CWORK, CWORK_V, CVHAR, CV, RCHTOT, RV )
+  
+  ! Initialize to zero efficiently on device
+  !$acc kernels present(CWORK, CWORK_V, CVHAR, CV, RCHTOT, RV)
   CWORK = 0._q
   CWORK_V = 0._q
   CVHAR = 0._q
   CV = 0._q
   RV = 0._q
   RCHTOT = 0._q
+  !$acc end kernels
+#else
+  CWORK = 0._q
+  CWORK_V = 0._q
+  CVHAR = 0._q
+  CV = 0._q
+  RV = 0._q
+  RCHTOT = 0._q
+#endif
 
   !copy CHTOT to CWORK                                         
   CALL RC_ADD(CHTOT, 1.0_q, CHTOT, 0.0_q, CWORK, GRIDC)
@@ -2923,6 +2944,11 @@ SUBROUTINE GET_FERMISHIFT(LATT_CUR, T_INFO, GRIDC, WDES, CVPSP, CHTOT)
   CALL UNPACK_C2R(CWORK, 1.0_q, CWORK, 0.0_q, RCHTOT, GRIDC)
 
   ! vacuum level
+#ifdef _OPENACC
+  ! Sync GPU -> CPU for vacuum level calculation
+  CALL ACC_SYNC_ASYNC_Q() 
+  !$acc update self( RV, RCHTOT )
+#endif
   CALL GET_VAC_LEVEL(GRIDC, RCHTOT, RV, VACPOT_PSP)
 #ifdef debugsol
   IF (SP_IO%IU0>=0)  WRITE(SP_IO%IU0,*) 'VACPOT_PSP = ', VACPOT_PSP
@@ -2939,6 +2965,10 @@ SUBROUTINE GET_FERMISHIFT(LATT_CUR, T_INFO, GRIDC, WDES, CVPSP, CHTOT)
 !  CALL WRITE_TO_FILE(GRIDC, LATT_CUR, T_INFO, 'PHI_PSP_HAR_SHIFTED', RV)
 !#endif
 
+#ifdef _OPENACC
+  ! Only delete LOCAL arrays
+  !$acc exit data delete( RV, RCHTOT, CV, CVHAR, CWORK_V, CWORK )
+#endif
   DEALLOCATE(RCHTOT, RV)
   DEALLOCATE(CWORK_V, CWORK, CVHAR, CV)
 
